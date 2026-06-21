@@ -67,24 +67,66 @@ export default function HomelandScene({
     const scene = new THREE.Scene();
     scene.fog = new THREE.Fog(new THREE.Color("#0b1320"), 64, 138);
 
+    // ---- gradient sky dome + additive sun (depth + something for bloom to catch) ----
+    const sky = new THREE.Mesh(
+      new THREE.SphereGeometry(200, 32, 16),
+      new THREE.ShaderMaterial({
+        side: THREE.BackSide, depthWrite: false, fog: false,
+        uniforms: { top: { value: new THREE.Color("#1b3a5a") }, bot: { value: new THREE.Color("#0a0f18") }, off: { value: 0.18 } },
+        vertexShader: "varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }",
+        fragmentShader: "varying vec3 vP; uniform vec3 top; uniform vec3 bot; uniform float off; void main(){ float h = clamp(normalize(vP).y*0.5+0.5+off,0.0,1.0); gl_FragColor = vec4(mix(bot, top, h), 1.0); }",
+      })
+    );
+    scene.add(sky);
+    const sunTex = (() => { const cv = document.createElement("canvas"); cv.width = cv.height = 128; const c = cv.getContext("2d")!; const g = c.createRadialGradient(64, 64, 2, 64, 64, 64); g.addColorStop(0, "rgba(255,244,214,1)"); g.addColorStop(0.4, "rgba(255,210,140,0.55)"); g.addColorStop(1, "rgba(255,200,120,0)"); c.fillStyle = g; c.fillRect(0, 0, 128, 128); return new THREE.CanvasTexture(cv); })();
+    const sun = new THREE.Sprite(new THREE.SpriteMaterial({ map: sunTex, transparent: true, depthWrite: false, fog: false, blending: THREE.AdditiveBlending }));
+    sun.scale.setScalar(34); sun.position.set(-60, 70, -90); scene.add(sun);  // roughly behind the key light
+
     // ---- environment reflections (PMREM) ----
     const pmrem = new THREE.PMREMGenerator(renderer);
     const envRT = pmrem.fromScene(new RoomEnvironment(), 0.04);
     scene.environment = envRT.texture;
 
     const camera = new THREE.PerspectiveCamera(42, W / H, 0.1, 280);
-    const target = new THREE.Vector3(0, 0, 0);
-    let zoom = 1;
+    const target = new THREE.Vector3(0, 0, 0);   // look-at GOAL (pan moves this)
+    let zoom = 1;                                  // zoom GOAL (wheel/pinch moves this)
     const baseOff = new THREE.Vector3(0, 24, 27);
     const PAN = 13;
+
+    // --- smoothed camera state: the real camera lerps toward the goal each frame ---
+    const camPos = new THREE.Vector3();            // current camera position
+    const curLook = new THREE.Vector3(0, 0.6, 0);  // current look-at point
+    const _v = new THREE.Vector3();                // scratch vector (reused per frame)
+    let curZoom = 1, orbit = 0;                    // smoothed zoom + idle-orbit angle
+    let lastInput = performance.now();             // last pan/zoom/tap time (for idle drift)
+
+    const easeOutBack = (k: number) => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(k - 1, 3) + c1 * Math.pow(k - 1, 2); }; // overshoot easing
+    const aspectF = () => { const a = W / H; return a < 0.65 ? 1.55 : a < 1 ? 1.2 : 1; };  // pull camera back on tall phones
+
+    // desired camera position for the current target + zoom (+ gentle idle orbit)
+    const goalPos = (out: THREE.Vector3) => {
+      const o = baseOff.clone().multiplyScalar(curZoom * aspectF());
+      const s = Math.sin(orbit), c = Math.cos(orbit);                // rotate offset around Y
+      return out.set(target.x + o.x * c - o.z * s, o.y, target.z + o.x * s + o.z * c);
+    };
+
+    // hard snap — used on init + resize so the first frame has no lurch
     const place = () => {
-      const aspect = W / H; const af = aspect < 0.65 ? 1.55 : aspect < 1 ? 1.2 : 1;
-      const o = baseOff.clone().multiplyScalar(zoom * af);
-      camera.position.set(target.x + o.x, o.y, target.z + o.z);
-      camera.lookAt(target.x, 0.6, target.z);
-      camera.aspect = aspect; camera.updateProjectionMatrix();
+      camera.aspect = W / H; camera.updateProjectionMatrix();
+      curZoom = zoom; goalPos(camPos); camera.position.copy(camPos);
+      curLook.set(target.x, 0.6, target.z); camera.lookAt(curLook);
     };
     place();
+
+    // fly the camera so the tapped plot sits ABOVE the bottom sheet
+    const FOCUS_LIFT = 3.2;                         // bigger = plot sits higher on screen
+    const focusPlot = (i: number | null) => {
+      if (i == null) return;                        // keep current framing on deselect
+      const [px, pz] = POS[i];
+      target.set(Math.max(-PAN, Math.min(PAN, px)), 0, Math.max(-PAN, Math.min(PAN, pz + FOCUS_LIFT)));
+      zoom = Math.min(zoom, 0.82);                  // ease in a touch
+      lastInput = performance.now();
+    };
 
     // ---- post-processing (bloom) ----
     // MSAA + HDR render target — keeps faceted edges crisp through the composer
@@ -229,6 +271,17 @@ export default function HomelandScene({
       const ring = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({ color: new THREE.Color(accent), transparent: true, opacity: 0.9, side: THREE.DoubleSide, depthWrite: false, fog: false })); ring.rotation.x = -Math.PI / 2; ring.position.set(x, padTop + 0.2, z); ring.visible = false; island.add(ring); rings.push(ring);
     });
 
+    // accent glow beam under the selected plot — additive so bloom makes it shine
+    const glow = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.05, 1.7, 3.0, 24, 1, true),  // open-ended cone
+      new THREE.MeshBasicMaterial({ color: accent, transparent: true, opacity: 0.16, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending, fog: false })
+    );
+    glow.visible = false; island.add(glow);
+
+    // desktop hover ring (invisible until pointer hovers a pad)
+    const hoverRing = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false, fog: false }));
+    hoverRing.rotation.x = -Math.PI / 2; hoverRing.visible = false; island.add(hoverRing);
+
     // service trucks
     const trucks: { g: THREE.Group; route: { segs: { a: [number, number]; b: [number, number]; len: number }[]; total: number }; d: number; speed: number }[] = [];
     const makeRoute = (pts: [number, number][]) => { const segs = pts.map((p, i) => { const b = pts[(i + 1) % pts.length]; return { a: p, b, len: Math.hypot(b[0] - p[0], b[1] - p[1]) }; }); return { segs, total: segs.reduce((s, x) => s + x.len, 0) }; };
@@ -290,11 +343,34 @@ export default function HomelandScene({
     }
 
     const clearBuild = () => { animated.length = 0; while (buildLayer.children.length) { const c = buildLayer.children.pop()!; c.traverse((o) => { const m = o as THREE.Mesh; if (m.geometry) m.geometry.dispose(); }); } disposableMats.forEach((m) => m.dispose()); disposableMats = []; };
-    const rebuild = (pl: Plot[], sel: number | null, acc: string) => {
-      clearBuild();
-      POS.forEach(([x, z], i) => { const p = pl?.[i]; const m = model(p?.type || "", p?.level || 0); m.position.set(x, padTop + 0.13, z); shadowize(m); buildLayer.add(m); });
+    const prevSig: string[] = new Array(POS.length).fill("\u0000");  // last [type:level] per plot
+    const spawns: { obj: THREE.Object3D; t0: number }[] = [];        // buildings mid pop-in
+    let lastPlotsRef: Plot[] | null = null;                          // ref-compare to skip needless rebuilds
+    let selModel: THREE.Object3D | null = null;                      // selected building (for bob)
+    let selIndex: number | null = null;
+
+    const applySelection = (sel: number | null, acc: string) => {
       rings.forEach((r, i) => { r.visible = i === sel; (r.material as THREE.MeshBasicMaterial).color.set(acc); });
-      pal.flag.color.set(acc); pal.accentMat.color.set(acc); rim.color.set(acc);
+      if (selModel) selModel.position.y = padTop + 0.13;             // reset previous bob
+      selIndex = sel;
+      selModel = sel != null ? (buildLayer.children[sel] as THREE.Object3D) : null;
+      if (sel == null) glow.visible = false;
+      else { const [gx, gz] = POS[sel]; glow.position.set(gx, padTop + 1.4, gz); (glow.material as THREE.MeshBasicMaterial).color.set(acc); glow.visible = true; }
+      focusPlot(sel);                                                // fly camera to it
+    };
+
+    const rebuild = (pl: Plot[], sel: number | null, acc: string) => {
+      if (pl !== lastPlotsRef) {                                     // only recreate models when plots actually change
+        clearBuild();
+        POS.forEach(([x, z], i) => {
+          const p = pl?.[i]; const sig = `${p?.type || ""}:${p?.level || 0}`;
+          const m = model(p?.type || "", p?.level || 0); m.position.set(x, padTop + 0.13, z); shadowize(m); buildLayer.add(m);
+          if (sig !== prevSig[i]) { m.scale.setScalar(0.001); spawns.push({ obj: m, t0: performance.now() }); prevSig[i] = sig; } // pop-in only changed plots
+        });
+        pal.flag.color.set(acc); pal.accentMat.color.set(acc); rim.color.set(acc);
+        lastPlotsRef = pl;
+      }
+      applySelection(sel, acc);
     };
     api.current = { rebuild }; rebuild(plots, selected, accent);
 
@@ -303,8 +379,8 @@ export default function HomelandScene({
     const pointers = new Map<number, { x: number; y: number }>();
     let panLast: { x: number; y: number } | null = null, pinchLast = 0, moved = 0, downPt: { x: number; y: number } | null = null;
     const pick = (cx: number, cy: number) => { const r = renderer.domElement.getBoundingClientRect(); ndc.x = ((cx - r.left) / r.width) * 2 - 1; ndc.y = -((cy - r.top) / r.height) * 2 + 1; ray.setFromCamera(ndc, camera); const h = ray.intersectObjects(pickables, false); return h.length ? (h[0].object.userData.index as number) : null; };
-    const panBy = (dx: number, dy: number) => { const aspect = W / H; const af = aspect < 0.65 ? 1.55 : aspect < 1 ? 1.2 : 1; const k = 0.045 * zoom * af; target.x = Math.max(-PAN, Math.min(PAN, target.x - dx * k)); target.z = Math.max(-PAN, Math.min(PAN, target.z - dy * k)); place(); };
-    const zoomBy = (ratio: number) => { zoom = Math.max(0.5, Math.min(1.6, zoom / ratio)); place(); };
+    const panBy = (dx: number, dy: number) => { const k = 0.045 * zoom * aspectF(); target.x = Math.max(-PAN, Math.min(PAN, target.x - dx * k)); target.z = Math.max(-PAN, Math.min(PAN, target.z - dy * k)); lastInput = performance.now(); }; // tick eases the camera there
+    const zoomBy = (ratio: number) => { zoom = Math.max(0.5, Math.min(1.6, zoom / ratio)); lastInput = performance.now(); };
     const el = renderer.domElement; el.style.touchAction = "none"; el.style.cursor = "grab";
     const onDown = (e: PointerEvent) => { pointers.set(e.pointerId, { x: e.clientX, y: e.clientY }); el.setPointerCapture?.(e.pointerId); if (pointers.size === 1) { panLast = { x: e.clientX, y: e.clientY }; downPt = { x: e.clientX, y: e.clientY }; moved = 0; } else { panLast = null; pinchLast = 0; } };
     const onMove = (e: PointerEvent) => {
@@ -321,10 +397,41 @@ export default function HomelandScene({
     const onWheel = (e: WheelEvent) => { e.preventDefault(); zoomBy(1 - e.deltaY * 0.0012); };
     el.addEventListener("pointerdown", onDown); el.addEventListener("pointermove", onMove); el.addEventListener("pointerup", onUp); el.addEventListener("pointercancel", onUp); el.addEventListener("wheel", onWheel, { passive: false });
 
+    // desktop hover highlight — no-op on touch (pointermove only fires with a button down there)
+    const onHover = (e: PointerEvent) => {
+      if (pointers.size > 0) return;                       // ignore while dragging/pinching
+      const i = pick(e.clientX, e.clientY);
+      el.style.cursor = i != null ? "pointer" : "grab";
+      if (i != null && i !== selIndex) { const [hx, hz] = POS[i]; hoverRing.position.set(hx, padTop + 0.21, hz); hoverRing.visible = true; }
+      else hoverRing.visible = false;
+    };
+    el.addEventListener("pointermove", onHover);
+
     // ---- animate ----
     let raf = 0; const clock = new THREE.Clock();
     const tick = () => {
       const t = clock.getElapsedTime(), dt = Math.min(0.05, clock.getDelta());
+
+      // ---- camera: ease toward goal + gentle idle orbit ----
+      const idleN = (performance.now() - lastInput) > 4000;                                  // drift in after 4s untouched
+      orbit = THREE.MathUtils.lerp(orbit, idleN ? Math.sin(t * 0.18) * 0.16 : 0, 0.02);
+      curZoom = THREE.MathUtils.lerp(curZoom, zoom, 0.12);
+      camPos.lerp(goalPos(_v), 0.14); camera.position.copy(camPos);
+      curLook.x = THREE.MathUtils.lerp(curLook.x, target.x, 0.14);
+      curLook.z = THREE.MathUtils.lerp(curLook.z, target.z, 0.14);
+      camera.lookAt(curLook);
+
+      // ---- building spawn pop-in (overshoot, 0.42s) ----
+      for (let i = spawns.length - 1; i >= 0; i--) {
+        const sp = spawns[i]; const k = (performance.now() - sp.t0) / 420;
+        if (k >= 1) { sp.obj.scale.setScalar(1); spawns.splice(i, 1); }
+        else sp.obj.scale.setScalar(Math.max(0.001, easeOutBack(k)));
+      }
+
+      // ---- selected bob + glow pulse + hover-ring fade ----
+      if (selModel) selModel.position.y = padTop + 0.13 + Math.sin(t * 3) * 0.06;
+      if (glow.visible) (glow.material as THREE.MeshBasicMaterial).opacity = 0.12 + Math.sin(t * 4) * 0.06;
+      { const hm = hoverRing.material as THREE.MeshBasicMaterial; hm.opacity = THREE.MathUtils.lerp(hm.opacity, hoverRing.visible ? 0.32 : 0, 0.2); }
       for (let i = 0; i < wpos.count; i++) { const x = wbase[i * 3], z = wbase[i * 3 + 2]; wpos.setY(i, Math.sin(x * 0.15 + t) * 0.12 + Math.cos(z * 0.2 + t * 0.8) * 0.12); } wpos.needsUpdate = true;
       waterNormal.offset.set(t * 0.018, t * 0.012);
       for (const tr of trucks) { tr.d += tr.speed * dt; const p = alongRoute(tr.route, tr.d); tr.g.position.set(p.x, roadY + 0.05, p.z); tr.g.rotation.y = -p.ang + (tr.speed < 0 ? Math.PI / 2 : -Math.PI / 2) + Math.PI; }
@@ -343,11 +450,13 @@ export default function HomelandScene({
 
     return () => {
       cancelAnimationFrame(raf); ro.disconnect();
-      el.removeEventListener("pointerdown", onDown); el.removeEventListener("pointermove", onMove); el.removeEventListener("pointerup", onUp); el.removeEventListener("pointercancel", onUp); el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("pointerdown", onDown); el.removeEventListener("pointermove", onMove); el.removeEventListener("pointermove", onHover); el.removeEventListener("pointerup", onUp); el.removeEventListener("pointercancel", onUp); el.removeEventListener("wheel", onWheel);
       clearBuild();
       scene.traverse((o) => { const m = o as THREE.Mesh; if (m.geometry) m.geometry.dispose(); });
       palList.forEach((m) => m.dispose()); rings.forEach((r) => (r.material as THREE.Material).dispose());
       grassTex.dispose(); waterNormal.dispose(); smokeTex.dispose();
+      (glow.material as THREE.Material).dispose(); (hoverRing.material as THREE.Material).dispose();
+      (sky.material as THREE.Material).dispose(); (sun.material as THREE.Material).dispose(); sunTex.dispose();
       composer.dispose(); envRT.dispose(); pmrem.dispose(); renderer.dispose();
       if (el.parentNode) el.parentNode.removeChild(el); api.current = null;
     };
