@@ -15,6 +15,7 @@ import HeroesScreen from "@/components/HeroesScreen";
 import LobbyScreen from "@/components/LobbyScreen";
 import AuthScreen from "@/components/AuthScreen";
 import MatchScreen from "@/components/MatchScreen";
+import ProfileScreen from "@/components/ProfileScreen";
 import type { Seat } from "@/lib/lobby";
 import { useGame } from "@/lib/store";
 import { fmt } from "@/lib/catalog";
@@ -26,11 +27,11 @@ type Tab = "campaign" | "collection" | "battle";
 const SCREEN_MUSIC: Record<string, MusicName> = {
   menu: "menuMusic", settings: "menuMusic", nation: "nationMusic",
   hub: "hubMusic", trade: "hubMusic", game: "hubMusic", homeland: "hubMusic",
-  barracks: "barracksMusic", world: "worldMusic", lobby: "menuMusic", auth: "menuMusic", match: "worldMusic",
+  barracks: "barracksMusic", world: "worldMusic", lobby: "menuMusic", auth: "menuMusic", match: "worldMusic", profile: "menuMusic",
 };
 
 export default function Page() {
-  const [screen, setScreen] = useState<"menu" | "intro" | "nation" | "hub" | "barracks" | "trade" | "world" | "game" | "settings" | "homeland" | "doctrine" | "heroes" | "lobby" | "auth" | "match">("menu");
+  const [screen, setScreen] = useState<"menu" | "intro" | "nation" | "hub" | "barracks" | "trade" | "world" | "game" | "settings" | "homeland" | "doctrine" | "heroes" | "lobby" | "auth" | "match" | "profile">("menu");
   const [match, setMatch] = useState<{ sessionId: string; seat: Seat; code: string } | null>(null);
   const [tab, setTab] = useState<Tab>("campaign");
   const game = useGame();
@@ -45,11 +46,15 @@ export default function Page() {
   const active = game.collection.filter((u) => u.troops > 0).length;
 
   if (screen === "menu") return (
-    <MainMenu hasSave={!!game.position} onContinue={() => setScreen(game.nation ? "hub" : "nation")} onNew={() => { game.reset(); setScreen("intro"); }} onMultiplayer={() => setScreen("lobby")} onAccount={() => setScreen("auth")} onSettings={() => setScreen("settings")} />
+    <MainMenu hasSave={!!game.position} onContinue={() => setScreen(game.nation ? "hub" : "nation")} onNew={() => { game.reset(); setScreen("intro"); }} onMultiplayer={() => setScreen("lobby")} onAccount={() => setScreen("auth")} onProfile={() => setScreen("profile")} onSettings={() => setScreen("settings")} />
   );
 
   if (screen === "auth") return (
     <AuthScreen onBack={() => setScreen("menu")} onDone={() => setScreen("menu")} />
+  );
+
+  if (screen === "profile") return (
+    <ProfileScreen onBack={() => setScreen("menu")} onAuth={() => setScreen("auth")} />
   );
 
   if (screen === "lobby") return (
