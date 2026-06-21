@@ -11,9 +11,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import WorldGlobe from "@/components/WorldGlobe";
 import { TERRITORIES, type Owner } from "@/lib/world";
-import { getUid, SEATS, type Seat } from "@/lib/lobby";
+import { getUid, SEATS, getName, type Seat } from "@/lib/lobby";
 import { authUserId } from "@/lib/auth";
 import { recordResult } from "@/lib/profiles";
+import { joinPresence, type PresenceMeta } from "@/lib/presence";
 import {
   SEAT_FACTION, FACTION_COLOR, standings, colorMapOf, mpOutcome, mpTick,
   type MPWorld, type Stance, type FactionId,
@@ -42,6 +43,8 @@ export default function MatchScreen({ sessionId, seat, code, onExit }: {
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
   const [pending, setPending] = useState(false);
+  const [online, setOnline] = useState<PresenceMeta[]>([]);                 // currently-connected players
+  const [toasts, setToasts] = useState<{ id: number; text: string; kind: "gain" | "loss" | "info" }[]>([]);
 
   const myFaction = SEAT_FACTION[seat] as FactionId;
   const uid = typeof window !== "undefined" ? getUid() : "ssr";
@@ -139,6 +142,50 @@ export default function MatchScreen({ sessionId, seat, code, onExit }: {
     recordResult(sessionId, myFaction, winner === myFaction).catch(() => {});
   }, [status, world, myFaction, sessionId]);
 
+  /* ---------------- presence: who is actually online ---------------- */
+  const presenceRef = useRef<RealtimeChannel | null>(null);
+  useEffect(() => {
+    const me: PresenceMeta = { uid, seat, faction: myFaction, name: getName() };
+    presenceRef.current = joinPresence(sessionId, me, setOnline);
+    return () => { presenceRef.current?.unsubscribe(); presenceRef.current = null; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  /* ---------------- toasts (alerts on the world map) ---------------- */
+  const toastSeq = useRef(0);
+  const pushToast = useCallback((text: string, kind: "gain" | "loss" | "info") => {
+    const id = ++toastSeq.current;
+    setToasts((t) => [...t, { id, text, kind }].slice(-4));            // keep last 4
+    setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 5000);
+  }, []);
+
+  // alert when another real commander comes online / goes offline
+  const prevOnlineRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const cur = new Set(online.filter((o) => o.faction !== myFaction).map((o) => o.faction));
+    const prev = prevOnlineRef.current;
+    for (const f of cur) if (!prev.has(f)) {
+      const o = online.find((x) => x.faction === f);
+      pushToast(`⚑ ${o?.name || nameFor(world, f)} is online`, "info");
+    }
+    for (const f of prev) if (!cur.has(f)) pushToast(`${nameFor(world, f)} went offline`, "info");
+    prevOnlineRef.current = cur;
+  }, [online, myFaction, world, pushToast]);
+
+  // alert when the war reaches YOU — new dispatches that mention your faction
+  const prevLogRef = useRef<string[]>([]);
+  useEffect(() => {
+    if (!world) return;
+    const myName = world.players[myFaction]?.name;
+    const fresh = newLogEntries(prevLogRef.current, world.log);
+    prevLogRef.current = world.log;
+    if (!myName) return;
+    for (const line of fresh) {
+      if (!line.includes(myName)) continue;
+      pushToast(line, line.includes(`from ${myName}`) ? "loss" : "gain");   // lost vs captured
+    }
+  }, [world, myFaction, pushToast]);
+
   /* ---------------- actions ---------------- */
   async function chooseStance(s: Stance) {
     if (!world) return;
@@ -161,6 +208,8 @@ export default function MatchScreen({ sessionId, seat, code, onExit }: {
   /* ---------------- derived ---------------- */
   const board = useMemo(() => (world ? standings(world) : []), [world]);
   const colorMap = useMemo(() => (world ? colorMapOf(world) : {}), [world]);
+  const onlineSet = useMemo(() => new Set(online.map((o) => o.faction)), [online]);   // factions currently connected
+  const playersOnline = online.length;
   const myStance: Stance = world?.stance[myFaction] || "balanced";
   const outcome = world ? mpOutcome(world) : null;
   const paused = !!world?.paused;
@@ -180,6 +229,7 @@ export default function MatchScreen({ sessionId, seat, code, onExit }: {
           <span className="ms-muted">· Turn {world?.tick ?? 0}</span>
         </div>
         <div className="ms-tr">
+          <span className="ms-onlinec"><span className="ms-livedot" /> {playersOnline} online</span>
           {status === "active" && !paused && <span className="ms-clock">next turn {secsLeft}s</span>}
           {paused && <span className="ms-paused">PAUSED</span>}
           {isHost && status === "active" && (
@@ -218,7 +268,15 @@ export default function MatchScreen({ sessionId, seat, code, onExit }: {
                 {board.map((b) => (
                   <div key={b.factionId} className={"ms-srow" + (b.factionId === myFaction ? " me" : "") + (b.count === 0 ? " dead" : "")}>
                     <span className="ms-sc" style={{ background: b.color }} />
-                    <span className="ms-sname">{b.name}{b.isAi && <span className="ms-ai">AI</span>}{b.factionId === myFaction && <span className="ms-you">YOU</span>}</span>
+                    <span className="ms-sname">
+                      {b.name}
+                      {b.isAi
+                        ? <span className="ms-ai">AI</span>
+                        : onlineSet.has(b.factionId)
+                          ? <span className="ms-on">● online</span>
+                          : <span className="ms-off">○ offline</span>}
+                      {b.factionId === myFaction && <span className="ms-you">YOU</span>}
+                    </span>
                     <span className="ms-spct">{b.count === 0 ? "out" : `${b.count} · ${b.pct}%`}</span>
                     <span className="ms-bar"><span style={{ width: `${b.pct}%`, background: b.color }} /></span>
                   </div>
@@ -256,6 +314,13 @@ export default function MatchScreen({ sessionId, seat, code, onExit }: {
 
       {error && <div className="ms-err">{error}</div>}
 
+      {/* live alerts on the world map */}
+      <div className="ms-toasts">
+        {toasts.map((t) => (
+          <div key={t.id} className={"ms-toast ms-" + t.kind}>{t.text}</div>
+        ))}
+      </div>
+
       {/* outcome overlay */}
       {outcome && (
         <div className="ms-overlay">
@@ -272,6 +337,16 @@ export default function MatchScreen({ sessionId, seat, code, onExit }: {
 
 const EMPTY = new Set<string>();
 function msg(e: unknown): string { return e instanceof Error ? e.message : "Something went wrong."; }
+// faction display name from the world roster (for alerts)
+function nameFor(world: MPWorld | null, faction: string): string {
+  return world?.players[faction]?.name || faction;
+}
+// the dispatches added since we last looked (log is newest-first, capped)
+function newLogEntries(oldLog: string[], newLog: string[]): string[] {
+  if (!oldLog.length) return [];                       // first load → don't alert on history
+  const idx = newLog.indexOf(oldLog[0]);
+  return idx === -1 ? newLog.slice(0, 3) : newLog.slice(0, idx);
+}
 
 const CSS = `
 .ms-wrap { position: relative; min-height: 100vh; background: #070b12; color: #e9eef7;
@@ -284,6 +359,21 @@ const CSS = `
 .ms-code { font-family: 'Space Grotesk', monospace; letter-spacing: 4px; font-size: 18px; color: #f0c860; }
 .ms-muted { color: #8092b0; font-size: 13px; }
 .ms-clock { font-family: 'Space Grotesk', monospace; font-size: 13px; color: #56b9cf; }
+.ms-onlinec { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: #c2cee2; }
+.ms-livedot { width: 8px; height: 8px; border-radius: 50%; background: #67c98a; box-shadow: 0 0 6px #67c98a; animation: msPulse 1.6s ease infinite; }
+@keyframes msPulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+.ms-on { font-size: 9px; color: #67c98a; letter-spacing: .5px; }
+.ms-off { font-size: 9px; color: #6f7f9c; letter-spacing: .5px; }
+
+.ms-toasts { position: fixed; top: 70px; right: 16px; z-index: 25; display: flex; flex-direction: column; gap: 8px; max-width: 320px; }
+.ms-toast { padding: 10px 13px; font-size: 13px; line-height: 1.35; color: #e9eef7; clip-path: var(--cham);
+  background: rgba(16,26,40,.95); border-left: 3px solid #56b9cf; box-shadow: 0 8px 22px rgba(0,0,0,.5);
+  animation: msToastIn .25s ease; }
+.ms-toast.ms-loss { border-left-color: #e5414f; }
+.ms-toast.ms-gain { border-left-color: #67c98a; }
+.ms-toast.ms-info { border-left-color: #f0c860; }
+@keyframes msToastIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
+@media (max-width: 560px) { .ms-toasts { left: 12px; right: 12px; max-width: none; } }
 .ms-paused { font-weight: 700; letter-spacing: 2px; color: #f0c860; font-size: 13px; }
 
 .ms-body { flex: 1; display: grid; grid-template-columns: 1fr 340px; min-height: 0; }
