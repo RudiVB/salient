@@ -90,7 +90,7 @@ export default function HomelandScene({
     const camera = new THREE.PerspectiveCamera(42, W / H, 0.1, 280);
     const target = new THREE.Vector3(0, 0, 0);   // look-at GOAL (pan moves this)
     let zoom = 1;                                  // zoom GOAL (wheel/pinch moves this)
-    const baseOff = new THREE.Vector3(0, 24, 27);
+    const baseOff = new THREE.Vector3(0, 34, 7);   // steep overhead (~78° pitch)
     const PAN = 13;
 
     // --- smoothed camera state: the real camera lerps toward the goal each frame ---
@@ -267,7 +267,7 @@ export default function HomelandScene({
     POS.forEach(([x, z], i) => {
       const pad = new THREE.Mesh(new THREE.CylinderGeometry(1.9, 2.0, 0.24, 28), pal.stone); pad.position.set(x, padTop, z); pad.receiveShadow = true; island.add(pad);
       const trim = new THREE.Mesh(new THREE.TorusGeometry(1.9, 0.08, 8, 28), pal.stoneDk); trim.rotation.x = -Math.PI / 2; trim.position.set(x, padTop + 0.13, z); island.add(trim);
-      const hit = new THREE.Mesh(new THREE.BoxGeometry(3.4, 5.5, 3.4), new THREE.MeshBasicMaterial({ visible: false })); hit.position.set(x, padTop + 2.2, z); hit.userData.index = i; island.add(hit); pickables.push(hit);
+      const hit = new THREE.Mesh(new THREE.BoxGeometry(4.4, 0.4, 4.4), new THREE.MeshBasicMaterial({ visible: false })); hit.position.set(x, padTop + 0.2, z); hit.userData.index = i; island.add(hit); pickables.push(hit);
       const ring = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({ color: new THREE.Color(accent), transparent: true, opacity: 0.9, side: THREE.DoubleSide, depthWrite: false, fog: false })); ring.rotation.x = -Math.PI / 2; ring.position.set(x, padTop + 0.2, z); ring.visible = false; island.add(ring); rings.push(ring);
     });
 

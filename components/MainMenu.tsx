@@ -16,8 +16,8 @@ import { toggleMute, isMuted } from "@/lib/audio";
  *   );
  */
 export default function MainMenu({
-  onContinue, onNew, onSettings, hasSave = true,
-}: { onContinue?: () => void; onNew?: () => void; onSettings?: () => void; hasSave?: boolean }) {
+  onContinue, onNew, onSettings, onMultiplayer, hasSave = true,
+}: { onContinue?: () => void; onNew?: () => void; onSettings?: () => void; onMultiplayer?: () => void; hasSave?: boolean }) {
   const sceneRef = useRef<HTMLDivElement>(null);
   const [howto, setHowto] = useState(false);
   const [muted, setMuted] = useState(false);
@@ -61,6 +61,7 @@ export default function MainMenu({
         <div className="mm-menu">
           {hasSave && <button className="mm-btn mm-primary" onClick={onContinue}>▸ Continue Campaign</button>}
           <button className="mm-btn" onClick={onNew}>New Campaign</button>
+          <button className="mm-btn" onClick={onMultiplayer}>⚔ Multiplayer</button>
           <button className="mm-btn mm-ghost" onClick={() => setHowto(true)}>How to Play</button>
           <button className="mm-btn mm-ghost" onClick={onSettings}>Settings</button>
         </div>
