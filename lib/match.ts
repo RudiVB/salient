@@ -3,8 +3,8 @@
 // game by setting their own stance on session_players; the host reads it each turn.
 "use client";
 import { supabase } from "@/lib/supabase";
-import { getUid } from "@/lib/lobby";
-import { SEAT_FACTION, type MPWorld, type Stance, type FactionId } from "@/lib/mpworld";
+import { getUid, fetchPlayers } from "@/lib/lobby";
+import { SEAT_FACTION, seedMPWorld, type MPWorld, type Stance, type FactionId, type MPPlayerMeta } from "@/lib/mpworld";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 
 export interface MatchSession {
@@ -57,6 +57,32 @@ export async function setStance(sessionId: string, stance: Stance): Promise<void
 export async function endMatch(sessionId: string): Promise<void> {
   const { error } = await supabase.from("sessions").update({ status: "ended" }).eq("id", sessionId);
   if (error) throw error;
+}
+
+// Take over as host (used when the original host has gone and the world is stale).
+export async function claimHost(sessionId: string): Promise<void> {
+  const { error } = await supabase
+    .from("sessions").update({ host_id: getUid() })
+    .eq("id", sessionId).eq("status", "active");
+  if (error) throw error;
+}
+
+// Safety net: if an active session somehow has no world yet, seed it from the roster.
+export async function ensureSeeded(sessionId: string): Promise<MPWorld | null> {
+  const s = await loadMatch(sessionId);
+  if (!s) return null;
+  if (s.world) return s.world;
+  const roster = await fetchPlayers(sessionId);
+  const players: Record<string, MPPlayerMeta> = {};
+  const stance: Record<string, Stance> = {};
+  for (const p of roster) {
+    const f = SEAT_FACTION[p.seat]; if (!f) continue;
+    players[f] = { name: p.display_name || f, isAi: p.is_ai, nation: p.nation };
+    stance[f] = (p.stance as Stance) || "balanced";
+  }
+  const world = seedMPWorld(players, stance);
+  await writeWorld(sessionId, world);
+  return world;
 }
 
 /* ---------------- realtime ---------------- */

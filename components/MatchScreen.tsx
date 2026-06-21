@@ -8,10 +8,10 @@
  * Wiring (app/page.tsx):
  *   <MatchScreen sessionId={m.sessionId} seat={m.seat} code={m.code} onExit={() => setScreen("menu")} />
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import WorldGlobe from "@/components/WorldGlobe";
 import { TERRITORIES, type Owner } from "@/lib/world";
-import { getUid, type Seat } from "@/lib/lobby";
+import { getUid, SEATS, type Seat } from "@/lib/lobby";
 import { authUserId } from "@/lib/auth";
 import { recordResult } from "@/lib/profiles";
 import {
@@ -20,11 +20,12 @@ import {
 } from "@/lib/mpworld";
 import {
   loadMatch, writeWorld, setStance as apiSetStance, endMatch, fetchSeatStances, subscribeMatch,
-  type MatchSession,
+  claimHost, ensureSeeded, type MatchSession,
 } from "@/lib/match";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 
 const TURN_MS = 8000;                            // one world turn every 8s
+const STALE_MS = TURN_MS * 2;                     // host considered gone after this with no turn
 const STANCES: Stance[] = ["aggressive", "balanced", "defensive"];
 const STANCE_LABEL: Record<Stance, string> = { aggressive: "⚔ Aggressive", balanced: "⚖ Balanced", defensive: "🛡 Defensive" };
 
@@ -49,7 +50,16 @@ export default function MatchScreen({ sessionId, seat, code, onExit }: {
   const worldRef = useRef<MPWorld | null>(null);     // latest world for the host loop
   const tickingRef = useRef(false);                  // re-entrancy guard
   const channelRef = useRef<RealtimeChannel | null>(null);
+  const lastTickRef = useRef<number>(-1);            // last world.tick we anchored the countdown to
+  const [turnAnchor, setTurnAnchor] = useState<number>(Date.now());   // local time the current turn started
   useEffect(() => { worldRef.current = world; }, [world]);
+
+  // reset the countdown anchor whenever a NEW turn lands (host or via realtime).
+  // This makes the timer smooth and identical on every client, ignoring clock skew.
+  useEffect(() => {
+    if (!world) return;
+    if (world.tick !== lastTickRef.current) { lastTickRef.current = world.tick; setTurnAnchor(Date.now()); }
+  }, [world]);
 
   /* ---------------- initial load + realtime ---------------- */
   useEffect(() => {
@@ -59,7 +69,10 @@ export default function MatchScreen({ sessionId, seat, code, onExit }: {
         const s = await loadMatch(sessionId);
         if (!alive || !s) return;
         setHostId(s.host_id); setStatus(s.status);
-        setWorld((s.world as MPWorld) || null);
+        let w = (s.world as MPWorld) || null;
+        // host arriving to an un-seeded active match → seed it now
+        if (!w && s.status === "active" && s.host_id === uid) w = await ensureSeeded(sessionId);
+        setWorld(w);
       } catch (e) { setError(msg(e)); }
       finally { if (alive) setLoading(false); }
     })();
@@ -76,7 +89,7 @@ export default function MatchScreen({ sessionId, seat, code, onExit }: {
   /* ---------------- countdown ticker (display only) ---------------- */
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 250); return () => clearInterval(t); }, []);
 
-  /* ---------------- HOST turn loop ---------------- */
+  /* ---------------- turn driver (host advances; any player takes over if host is gone) ---------------- */
   const runTurn = useCallback(async () => {
     if (tickingRef.current) return;
     const w = worldRef.current;
@@ -91,11 +104,28 @@ export default function MatchScreen({ sessionId, seat, code, onExit }: {
     finally { tickingRef.current = false; }
   }, [sessionId]);
 
+  // Single 1s checker. The host advances when its 8s have elapsed. If the world
+  // goes stale (host left), the present players take over in seat order so the
+  // match keeps running for whoever rejoined.
+  const takeoverDelay = STALE_MS + Math.max(0, SEATS.indexOf(seat)) * 2000;   // staggered by seat
+  const claimingRef = useRef(false);
   useEffect(() => {
-    if (!isHost || status !== "active") return;
-    const t = setInterval(runTurn, TURN_MS);
+    if (status !== "active") return;
+    const t = setInterval(async () => {
+      const w = worldRef.current;
+      if (!w || w.paused) return;
+      const elapsed = Date.now() - w.lastTurnAt;
+      if (elapsed < TURN_MS) return;                               // not time for a turn yet
+      if (isHost) { runTurn(); return; }
+      if (elapsed > takeoverDelay && !claimingRef.current) {       // host seems gone → take over
+        claimingRef.current = true;
+        try { await claimHost(sessionId); setHostId(uid); await runTurn(); }
+        catch (e) { setError(msg(e)); }
+        finally { claimingRef.current = false; }
+      }
+    }, 1000);
     return () => clearInterval(t);
-  }, [isHost, status, runTurn]);
+  }, [status, isHost, runTurn, sessionId, takeoverDelay, uid]);
 
   /* ---------------- record result once the match is decided ---------------- */
   const recordedRef = useRef(false);
@@ -129,12 +159,12 @@ export default function MatchScreen({ sessionId, seat, code, onExit }: {
   }
 
   /* ---------------- derived ---------------- */
-  const board = world ? standings(world) : [];
-  const colorMap = world ? colorMapOf(world) : {};
+  const board = useMemo(() => (world ? standings(world) : []), [world]);
+  const colorMap = useMemo(() => (world ? colorMapOf(world) : {}), [world]);
   const myStance: Stance = world?.stance[myFaction] || "balanced";
   const outcome = world ? mpOutcome(world) : null;
   const paused = !!world?.paused;
-  const secsLeft = world ? Math.max(0, Math.ceil((TURN_MS - (now - world.lastTurnAt)) / 1000)) : 0;
+  const secsLeft = world ? Math.max(0, Math.ceil((TURN_MS - (now - turnAnchor)) / 1000)) : 0;
   const myCount = board.find((b) => b.factionId === myFaction)?.count ?? 0;
 
   /* ---------------- render ---------------- */
