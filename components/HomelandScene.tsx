@@ -37,12 +37,14 @@ const THEMES: Record<Biome, Theme> = {
 };
 
 export default function HomelandScene({
-  plots, selected, accent, nation, onSelect,
-}: { plots: Plot[]; selected: number | null; accent: string; nation: string | null; onSelect: (index: number | null) => void }) {
+  plots, selected, accent, nation, onSelect, onReady,
+}: { plots: Plot[]; selected: number | null; accent: string; nation: string | null; onSelect: (index: number | null) => void; onReady?: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const api = useRef<{ rebuild: (p: Plot[], sel: number | null, acc: string) => void } | null>(null);
   const onSelectRef = useRef(onSelect);
   onSelectRef.current = onSelect;
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
 
   const COLS = 5, ROWS = 4, GX = 5, GZ = 5;
   const POS: [number, number][] = [];
@@ -60,7 +62,7 @@ export default function HomelandScene({
     renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;          // filmic contrast/colour
-    renderer.toneMappingExposure = 1.05;
+    renderer.toneMappingExposure = 1.14;          // golden-hour lift
     const maxAniso = renderer.capabilities.getMaxAnisotropy();
     mount.appendChild(renderer.domElement);
 
@@ -140,14 +142,15 @@ export default function HomelandScene({
     composer.addPass(new OutputPass());
 
     // ---- lights (env provides soft fill, so key + light hemi) ----
-    scene.add(new THREE.HemisphereLight(0xbcd6e6, 0x2a3a30, 0.45));
-    const key = new THREE.DirectionalLight(0xfff0d2, 2.1);
-    key.position.set(-22, 34, 16); key.castShadow = true;
+    scene.add(new THREE.HemisphereLight(0x9fc4e8, 0x35301f, 0.5));   // cool sky / warm earth fill
+    const key = new THREE.DirectionalLight(0xffe2ad, 2.55);          // warm low sun
+    key.position.set(-26, 30, 14); key.castShadow = true;            // lower angle = longer, softer shadows
     const smap = mobile ? 2048 : 3072; key.shadow.mapSize.set(smap, smap);
     key.shadow.camera.near = 1; key.shadow.camera.far = 120;
     const sc = key.shadow.camera as THREE.OrthographicCamera; const S = 26; sc.left = -S; sc.right = S; sc.top = S; sc.bottom = -S; sc.updateProjectionMatrix();
     key.shadow.bias = -0.0004; key.shadow.normalBias = 0.035; scene.add(key);
-    const rim = new THREE.DirectionalLight(new THREE.Color(accent), 0.4); rim.position.set(18, 9, -18); scene.add(rim);
+    const fill = new THREE.DirectionalLight(0x7fa6d6, 0.35); fill.position.set(20, 16, 22); scene.add(fill);   // cool bounce on shadow side
+    const rim = new THREE.DirectionalLight(new THREE.Color(accent), 0.7); rim.position.set(18, 9, -18); scene.add(rim);  // accent backlight
 
     // ---- procedural textures ----
     const noiseTex = (base: number, varc: number, size = 256, reps = 8) => {
@@ -181,6 +184,8 @@ export default function HomelandScene({
       glassLit: std(0xffd98a, { emissive: 0xffb43c, emissiveIntensity: 1.5, roughness: 0.3 }), glass: std(0x2a4250, { metalness: 0.6, roughness: 0.15, envMapIntensity: 1.5 }),
       white: std(0xe8e4d8, { roughness: 0.8 }), red: std(0xb53a30, { roughness: 0.7 }), flag: std(new THREE.Color(accent).getHex(), { side: THREE.DoubleSide, roughness: 0.8 }),
       truck: std(0x46525e, { metalness: 0.55, roughness: 0.4, envMapIntensity: 1.2 }), accentMat: std(new THREE.Color(accent).getHex(), { roughness: 0.6 }),
+      beacon: std(new THREE.Color(accent).getHex(), { emissive: new THREE.Color(accent), emissiveIntensity: 1.7, roughness: 0.4 }),  // glowing build markers (bloom)
+      lamp: std(0xffd07a, { emissive: 0xffb43c, emissiveIntensity: 2.2, roughness: 0.3 }),  // warm street-lamp bulbs
     };
     const palList = Object.values(pal) as THREE.Material[];
     const shadowize = (o: THREE.Object3D) => o.traverse((m) => { const me = m as THREE.Mesh; if (me.isMesh) { me.castShadow = true; me.receiveShadow = true; } });
@@ -282,6 +287,35 @@ export default function HomelandScene({
     const hoverRing = new THREE.Mesh(ringGeo, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false, fog: false }));
     hoverRing.rotation.x = -Math.PI / 2; hoverRing.visible = false; island.add(hoverRing);
 
+    // ---- street lamps at road intersections (warm bloom dots — great overhead) ----
+    for (let c = 0; c <= COLS; c++) for (let r = 0; r <= ROWS; r++) {
+      const lx = (c - COLS / 2) * GX, lz = (r - ROWS / 2) * GZ;
+      const post = cyl(0.06, 0.08, 1.7, 8, pal.darkMetal, lx, roadY + 0.85, lz); post.castShadow = true; island.add(post);
+      const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.16, 12, 10), pal.lamp); bulb.position.set(lx, roadY + 1.78, lz); island.add(bulb);
+    }
+
+    // ---- selection reticle: 4 rotating corner brackets on the active pad (military targeting) ----
+    const reticleMat = new THREE.MeshBasicMaterial({ color: accent, transparent: true, opacity: 0.95, depthWrite: false, blending: THREE.AdditiveBlending, fog: false, side: THREE.DoubleSide });
+    const reticle = new THREE.Group();
+    const RS = 2.45, ARM = 0.7, TH = 0.09;                       // square half-extent · arm length · thickness
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+      const cxp = sx * RS, czp = sz * RS;
+      const hb = new THREE.Mesh(new THREE.BoxGeometry(ARM, TH, TH), reticleMat); hb.position.set(cxp - sx * ARM / 2, 0, czp);
+      const vb = new THREE.Mesh(new THREE.BoxGeometry(TH, TH, ARM), reticleMat); vb.position.set(cxp, 0, czp - sz * ARM / 2);
+      reticle.add(hb, vb);
+    }
+    reticle.visible = false; island.add(reticle);
+
+    // ---- drifting dust motes (additive, catches bloom for cinematic air) ----
+    const dustTex = (() => { const cv = document.createElement("canvas"); cv.width = cv.height = 32; const c = cv.getContext("2d")!; const g = c.createRadialGradient(16, 16, 0, 16, 16, 16); g.addColorStop(0, "rgba(255,240,210,0.9)"); g.addColorStop(1, "rgba(255,240,210,0)"); c.fillStyle = g; c.fillRect(0, 0, 32, 32); return new THREE.CanvasTexture(cv); })();
+    const DUST = mobile ? 90 : 150;
+    const dustGeo = new THREE.BufferGeometry();
+    const dpos = new Float32Array(DUST * 3); const dbase = new Float32Array(DUST);
+    for (let i = 0; i < DUST; i++) { const a = Math.random() * Math.PI * 2, rr = Math.random() * (ROUND - 1); dpos[i * 3] = Math.cos(a) * rr; dpos[i * 3 + 1] = 1 + Math.random() * 9; dpos[i * 3 + 2] = Math.sin(a) * rr; dbase[i] = Math.random() * 10; }
+    dustGeo.setAttribute("position", new THREE.BufferAttribute(dpos, 3));
+    const dust = new THREE.Points(dustGeo, new THREE.PointsMaterial({ map: dustTex, size: 0.42, transparent: true, opacity: 0.5, depthWrite: false, blending: THREE.AdditiveBlending, sizeAttenuation: true, fog: false }));
+    scene.add(dust);
+
     // service trucks
     const trucks: { g: THREE.Group; route: { segs: { a: [number, number]; b: [number, number]; len: number }[]; total: number }; d: number; speed: number }[] = [];
     const makeRoute = (pts: [number, number][]) => { const segs = pts.map((p, i) => { const b = pts[(i + 1) % pts.length]; return { a: p, b, len: Math.hypot(b[0] - p[0], b[1] - p[1]) }; }); return { segs, total: segs.reduce((s, x) => s + x.len, 0) }; };
@@ -297,13 +331,18 @@ export default function HomelandScene({
     // ---- building layer ----
     const buildLayer = new THREE.Group(); island.add(buildLayer);
     let disposableMats: THREE.Material[] = [];
-    const animated: { kind: "smoke" | "flag" | "spin"; obj: THREE.Object3D; base: number }[] = [];
+    const animated: { kind: "smoke" | "flag" | "spin" | "beacon"; obj: THREE.Object3D; base: number }[] = [];
     const smokeTex = (() => { const cv = document.createElement("canvas"); cv.width = cv.height = 64; const c = cv.getContext("2d")!; const g = c.createRadialGradient(32, 32, 1, 32, 32, 31); g.addColorStop(0, "rgba(228,228,232,0.85)"); g.addColorStop(1, "rgba(228,228,232,0)"); c.fillStyle = g; c.fillRect(0, 0, 64, 64); return new THREE.CanvasTexture(cv); })();
     const addSmoke = (parent: THREE.Object3D, x: number, y: number, z: number) => { const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: smokeTex, transparent: true, depthWrite: false, opacity: 0.6 })); s.scale.setScalar(1.0); s.position.set(x, y, z); parent.add(s); animated.push({ kind: "smoke", obj: s, base: y }); disposableMats.push(s.material); };
 
     function model(id: string, lvl: number): THREE.Group {
       const g = new THREE.Group();
-      if (!id || lvl <= 0) { g.add(cyl(0.09, 0.11, 0.6, 8, pal.woodLt, 0, 0.3, 0)); g.add(box(0.9, 0.45, 0.06, pal.glass, 0, 0.7, 0)); return g; }
+      if (!id || lvl <= 0) {
+        const ftorus = new THREE.Mesh(new THREE.TorusGeometry(1.05, 0.05, 8, 28), pal.beacon); ftorus.rotation.x = -Math.PI / 2; ftorus.position.y = 0.06; g.add(ftorus);  // foundation outline
+        const plus = grp(box(0.7, 0.13, 0.13, pal.beacon, 0, 0, 0), box(0.13, 0.13, 0.7, pal.beacon, 0, 0, 0)); plus.position.y = 0.95; g.add(plus);  // floating build "+"
+        animated.push({ kind: "beacon", obj: plus, base: 0.95 });
+        return g;
+      }
       const L = lvl;
       if (id === "industry") {
         const bh = 1.2 + L * 0.12; g.add(rbox(2.2, bh, 1.6, pal.brick, 0, bh / 2)); g.add(roof(2.5, 0.55, 1.8, pal.slate, bh + 0.28)); g.add(windows(3, bh * 0.55, 0.81, 0.65)); g.add(rbox(0.5, 0.7, 0.06, pal.woodDk, 0, 0.35, 0.81));
@@ -356,6 +395,9 @@ export default function HomelandScene({
       selModel = sel != null ? (buildLayer.children[sel] as THREE.Object3D) : null;
       if (sel == null) glow.visible = false;
       else { const [gx, gz] = POS[sel]; glow.position.set(gx, padTop + 1.4, gz); (glow.material as THREE.MeshBasicMaterial).color.set(acc); glow.visible = true; }
+      reticleMat.color.set(acc);
+      if (sel == null) reticle.visible = false;
+      else { const [rx, rz] = POS[sel]; reticle.position.set(rx, padTop + 0.26, rz); reticle.visible = true; }
       focusPlot(sel);                                                // fly camera to it
     };
 
@@ -367,7 +409,7 @@ export default function HomelandScene({
           const m = model(p?.type || "", p?.level || 0); m.position.set(x, padTop + 0.13, z); shadowize(m); buildLayer.add(m);
           if (sig !== prevSig[i]) { m.scale.setScalar(0.001); spawns.push({ obj: m, t0: performance.now() }); prevSig[i] = sig; } // pop-in only changed plots
         });
-        pal.flag.color.set(acc); pal.accentMat.color.set(acc); rim.color.set(acc);
+        pal.flag.color.set(acc); pal.accentMat.color.set(acc); pal.beacon.color.set(acc); (pal.beacon as THREE.MeshStandardMaterial).emissive.set(acc); reticleMat.color.set(acc); rim.color.set(acc);
         lastPlotsRef = pl;
       }
       applySelection(sel, acc);
@@ -408,7 +450,7 @@ export default function HomelandScene({
     el.addEventListener("pointermove", onHover);
 
     // ---- animate ----
-    let raf = 0; const clock = new THREE.Clock();
+    let raf = 0; const clock = new THREE.Clock(); let readyFired = false;
     const tick = () => {
       const t = clock.getElapsedTime(), dt = Math.min(0.05, clock.getDelta());
 
@@ -428,20 +470,28 @@ export default function HomelandScene({
         else sp.obj.scale.setScalar(Math.max(0.001, easeOutBack(k)));
       }
 
-      // ---- selected bob + glow pulse + hover-ring fade ----
+      // ---- selected bob + glow pulse + reticle spin + hover-ring fade ----
       if (selModel) selModel.position.y = padTop + 0.13 + Math.sin(t * 3) * 0.06;
       if (glow.visible) (glow.material as THREE.MeshBasicMaterial).opacity = 0.12 + Math.sin(t * 4) * 0.06;
+      if (reticle.visible) reticle.rotation.y = t * 0.5;
       { const hm = hoverRing.material as THREE.MeshBasicMaterial; hm.opacity = THREE.MathUtils.lerp(hm.opacity, hoverRing.visible ? 0.32 : 0, 0.2); }
+
+      // ---- drifting dust motes ----
+      const dp = dustGeo.attributes.position as THREE.BufferAttribute;
+      for (let i = 0; i < DUST; i++) { let y = dp.getY(i) + dt * 0.25; if (y > 11) y = 1; dp.setY(i, y); dp.setX(i, dp.getX(i) + Math.sin(t * 0.3 + dbase[i]) * dt * 0.08); } dp.needsUpdate = true;
       for (let i = 0; i < wpos.count; i++) { const x = wbase[i * 3], z = wbase[i * 3 + 2]; wpos.setY(i, Math.sin(x * 0.15 + t) * 0.12 + Math.cos(z * 0.2 + t * 0.8) * 0.12); } wpos.needsUpdate = true;
       waterNormal.offset.set(t * 0.018, t * 0.012);
       for (const tr of trucks) { tr.d += tr.speed * dt; const p = alongRoute(tr.route, tr.d); tr.g.position.set(p.x, roadY + 0.05, p.z); tr.g.rotation.y = -p.ang + (tr.speed < 0 ? Math.PI / 2 : -Math.PI / 2) + Math.PI; }
       for (const a of animated) {
         if (a.kind === "smoke") { const s = a.obj as THREE.Sprite; const ph = (t * 0.4 + a.base) % 1; s.position.y = a.base + ph * 1.3; (s.material as THREE.SpriteMaterial).opacity = 0.5 * (1 - ph); s.scale.setScalar(0.6 + ph * 1.2); }
         else if (a.kind === "spin") a.obj.rotation.z = t * a.base;
+        else if (a.kind === "beacon") { a.obj.position.y = a.base + Math.sin(t * 2 + a.obj.position.x) * 0.12; a.obj.rotation.y = t * 0.8; }
         else { a.obj.rotation.y = Math.sin(t * 4 + a.obj.position.z) * 0.35; a.obj.scale.x = 1 + Math.sin(t * 8) * 0.08; }
       }
       rings.forEach((r) => { if (r.visible) { (r.material as THREE.MeshBasicMaterial).opacity = 0.55 + Math.sin(t * 4) * 0.35; r.scale.setScalar(1 + Math.sin(t * 4) * 0.04); } });
-      composer.render(); raf = requestAnimationFrame(tick);
+      composer.render();
+      if (!readyFired) { readyFired = true; onReadyRef.current?.(); }   // signal first frame painted
+      raf = requestAnimationFrame(tick);
     };
     tick();
 
@@ -456,6 +506,7 @@ export default function HomelandScene({
       palList.forEach((m) => m.dispose()); rings.forEach((r) => (r.material as THREE.Material).dispose());
       grassTex.dispose(); waterNormal.dispose(); smokeTex.dispose();
       (glow.material as THREE.Material).dispose(); (hoverRing.material as THREE.Material).dispose();
+      reticleMat.dispose(); dustTex.dispose(); (dust.material as THREE.Material).dispose();
       (sky.material as THREE.Material).dispose(); (sun.material as THREE.Material).dispose(); sunTex.dispose();
       composer.dispose(); envRT.dispose(); pmrem.dispose(); renderer.dispose();
       if (el.parentNode) el.parentNode.removeChild(el); api.current = null;

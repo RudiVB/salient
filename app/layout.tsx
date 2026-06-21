@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { GameProvider } from "@/lib/store";
+import CloudSync from "@/components/CloudSync";
 
 export const metadata: Metadata = {
   title: "Salient — 1916",
@@ -11,7 +12,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body><GameProvider>{children}</GameProvider></body>
+      <body><GameProvider>{children}<CloudSync /></GameProvider></body>
     </html>
   );
 }

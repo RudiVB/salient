@@ -1,14 +1,22 @@
-// lib/lobby.ts — all reads/writes + realtime for the multiplayer LOBBY slice.
-// Tables: sessions(code unique, status default 'lobby', host_id) and
-// session_players(unique(session_id, seat)). Permissive RLS, Realtime on both.
-// Anonymous identity: a stable uuid + display name kept in localStorage.
-
+// lib/lobby.ts — reads/writes + realtime for the multiplayer lobby.
+// Identity comes from lib/auth (auth user id when logged in, else guest id), so
+// the same code path works for accounts and guests. Tables: sessions /
+// session_players (+ visibility/name/max_players) and the public_lobbies view.
 "use client";
 import { supabase } from "@/lib/supabase";
+import { currentUid, displayName, setLocalName, upsertProfile, authUserId } from "@/lib/auth";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 
+/* ---------------- identity (delegated to auth) ---------------- */
+export const getUid = (): string => currentUid();
+export const getName = (): string => displayName();
+export async function setName(n: string): Promise<void> {
+  setLocalName(n);
+  const uid = authUserId();
+  if (uid) await upsertProfile(uid, n);   // keep profile username in sync when logged in
+}
+
 /* ---------------- seats ↔ factions ---------------- */
-// Four lobby seats mapped to the four living-world faction colours (lib/worldsim).
 export type Seat = "player1" | "player2" | "player3" | "player4";
 export const SEATS: Seat[] = ["player1", "player2", "player3", "player4"];
 export interface SeatInfo { seat: Seat; faction: string; name: string; color: string; }
@@ -19,94 +27,85 @@ export const SEAT_INFO: Record<Seat, SeatInfo> = {
   player4: { seat: "player4", faction: "verdant", name: "Verdant League",  color: "#67c98a" },
 };
 
-/* ---------------- row types (match schema) ---------------- */
+/* ---------------- row types ---------------- */
+export type Visibility = "public" | "private";
 export interface SessionRow {
-  id: string;
-  code: string;
-  status: string;                 // 'lobby' | 'active' | ...
-  host_id: string;
-  world: unknown | null;
-  tick: number;
-  last_turn_at: string | null;
-  created_at: string;
+  id: string; code: string; status: string; host_id: string;
+  world: unknown | null; tick: number; last_turn_at: string | null; created_at: string;
+  visibility: Visibility; name: string | null; max_players: number;
 }
 export interface PlayerRow {
-  id: string;
-  session_id: string;
-  user_id: string;
-  seat: Seat;
-  nation: string | null;
-  display_name: string | null;
-  is_ai: boolean;
-  ready: boolean;
-  joined_at: string;
+  id: string; session_id: string; user_id: string; seat: Seat;
+  nation: string | null; display_name: string | null; is_ai: boolean; ready: boolean; joined_at: string;
 }
-
-/* ---------------- anonymous identity (localStorage) ---------------- */
-const UID_KEY = "salient_uid";
-const NAME_KEY = "salient_name";
-
-// Stable per-browser id; created once and reused for every session.
-export function getUid(): string {
-  if (typeof window === "undefined") return "ssr";          // never used server-side
-  let id = localStorage.getItem(UID_KEY);
-  if (!id) { id = crypto.randomUUID(); localStorage.setItem(UID_KEY, id); }
-  return id;
-}
-export function getName(): string {
-  if (typeof window === "undefined") return "Commander";
-  return localStorage.getItem(NAME_KEY) || "Commander";
-}
-export function setName(n: string): void {
-  if (typeof window !== "undefined") localStorage.setItem(NAME_KEY, n.slice(0, 20) || "Commander");
+export interface PublicLobby {
+  id: string; code: string; name: string | null; host_id: string;
+  created_at: string; max_players: number; player_count: number;
 }
 
 /* ---------------- join code ---------------- */
-// 5-char code, no ambiguous chars (no 0/O/1/I) — easy to read aloud.
-const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";   // no 0/O/1/I
 function makeCode(): string {
-  let c = "";
-  const r = new Uint32Array(5);
-  crypto.getRandomValues(r);
+  let c = ""; const r = new Uint32Array(5); crypto.getRandomValues(r);
   for (let i = 0; i < 5; i++) c += CODE_ALPHABET[r[i] % CODE_ALPHABET.length];
   return c;
 }
 
 /* ---------------- reads ---------------- */
-// All players in a session, ordered by seat for stable rendering.
 export async function fetchPlayers(sessionId: string): Promise<PlayerRow[]> {
   const { data, error } = await supabase
-    .from("session_players")
-    .select("*")
-    .eq("session_id", sessionId)
-    .order("seat", { ascending: true });
+    .from("session_players").select("*").eq("session_id", sessionId).order("seat", { ascending: true });
   if (error) throw error;
   return (data || []) as PlayerRow[];
 }
-// One session by id (used after realtime UPDATE events).
 export async function fetchSession(sessionId: string): Promise<SessionRow | null> {
   const { data, error } = await supabase.from("sessions").select("*").eq("id", sessionId).maybeSingle();
   if (error) throw error;
   return (data as SessionRow) || null;
 }
+// Server browser: open, public lobbies with live player counts.
+export async function listPublicLobbies(): Promise<PublicLobby[]> {
+  const { data, error } = await supabase
+    .from("public_lobbies").select("*").order("created_at", { ascending: false }).limit(40);
+  if (error) throw error;
+  return (data || []) as PublicLobby[];
+}
+
+/* ---------------- seat claim helper ---------------- */
+// Claim the first free seat in a session for the current user. Race-safe via the
+// UNIQUE(session_id, seat) constraint (retries the next seat on 23505).
+async function claimFreeSeat(session: SessionRow): Promise<Seat> {
+  const uid = getUid();
+  const players = await fetchPlayers(session.id);
+  const mine = players.find((p) => p.user_id === uid);
+  if (mine) return mine.seat;                                   // rejoin → keep seat
+  const taken = new Set(players.map((p) => p.seat));
+  for (const seat of SEATS) {
+    if (taken.has(seat)) continue;
+    const { error } = await supabase.from("session_players").insert({
+      session_id: session.id, user_id: uid, seat,
+      display_name: getName(), is_ai: false, ready: false,
+    });
+    if (!error) return seat;
+    if (error.code !== "23505") throw error;                   // not a seat collision
+  }
+  throw new Error("This lobby is full.");
+}
 
 /* ---------------- create / join ---------------- */
-// Host creates a session (unique code, retrying on collision) and claims player1.
-export async function createSession(): Promise<{ session: SessionRow; seat: Seat }> {
+export interface CreateOpts { name?: string; visibility?: Visibility; }
+// Host creates a session (unique code) and claims player1.
+export async function createSession(opts: CreateOpts = {}): Promise<{ session: SessionRow; seat: Seat }> {
   const uid = getUid();
+  const name = (opts.name?.trim() || `${getName()}'s War`).slice(0, 40);
+  const visibility: Visibility = opts.visibility === "private" ? "private" : "public";
   for (let attempt = 0; attempt < 6; attempt++) {
     const code = makeCode();
     const { data, error } = await supabase
-      .from("sessions")
-      .insert({ code, host_id: uid, status: "lobby" })   // status/tick use defaults
-      .select("*")
-      .single();
-    if (error) {
-      if (error.code === "23505") continue;               // unique_violation on code → retry
-      throw error;
-    }
+      .from("sessions").insert({ code, host_id: uid, status: "lobby", name, visibility, max_players: 4 })
+      .select("*").single();
+    if (error) { if (error.code === "23505") continue; throw error; }
     const session = data as SessionRow;
-    // Host takes seat player1.
     const { error: pErr } = await supabase.from("session_players").insert({
       session_id: session.id, user_id: uid, seat: "player1",
       display_name: getName(), is_ai: false, ready: false,
@@ -117,78 +116,46 @@ export async function createSession(): Promise<{ session: SessionRow; seat: Seat
   throw new Error("Could not generate a unique join code — try again.");
 }
 
-// Join an existing lobby by code; claims the first free seat.
+// Join by 5-char code (works for public or private lobbies).
 export async function joinSession(rawCode: string): Promise<{ session: SessionRow; seat: Seat }> {
-  const uid = getUid();
   const code = rawCode.trim().toUpperCase();
-  const { data: sRow, error: sErr } = await supabase
-    .from("sessions").select("*").eq("code", code).maybeSingle();
-  if (sErr) throw sErr;
+  const { data: sRow, error } = await supabase.from("sessions").select("*").eq("code", code).maybeSingle();
+  if (error) throw error;
   if (!sRow) throw new Error("No lobby found with that code.");
   const session = sRow as SessionRow;
   if (session.status !== "lobby") throw new Error("That game has already started.");
+  const seat = await claimFreeSeat(session);
+  return { session, seat };
+}
 
-  const players = await fetchPlayers(session.id);
-
-  // Already in this lobby (e.g. rejoin) — reuse existing seat.
-  const mine = players.find((p) => p.user_id === uid);
-  if (mine) return { session, seat: mine.seat };
-
-  const taken = new Set(players.map((p) => p.seat));
-  // Try each free seat; UNIQUE(session_id, seat) handles races between joiners.
-  for (const seat of SEATS) {
-    if (taken.has(seat)) continue;
-    const { error } = await supabase.from("session_players").insert({
-      session_id: session.id, user_id: uid, seat,
-      display_name: getName(), is_ai: false, ready: false,
-    });
-    if (!error) return { session, seat };
-    if (error.code !== "23505") throw error;               // not a seat-collision → real error
-    // 23505: someone grabbed this seat first — try the next one.
-  }
-  throw new Error("This lobby is full (4/4).");
+// Join a public lobby from the server browser by id.
+export async function joinPublicLobby(sessionId: string): Promise<{ session: SessionRow; seat: Seat }> {
+  const session = await fetchSession(sessionId);
+  if (!session) throw new Error("That lobby no longer exists.");
+  if (session.status !== "lobby") throw new Error("That game has already started.");
+  const seat = await claimFreeSeat(session);
+  return { session, seat };
 }
 
 /* ---------------- seat / nation / ready ---------------- */
-// Move into a different empty seat (changes your faction).
 export async function switchSeat(sessionId: string, seat: Seat): Promise<boolean> {
-  const uid = getUid();
-  const { error } = await supabase
-    .from("session_players").update({ seat })
-    .eq("session_id", sessionId).eq("user_id", uid);
-  if (error) {
-    if (error.code === "23505") return false;              // seat just got taken
-    throw error;
-  }
+  const { error } = await supabase.from("session_players").update({ seat })
+    .eq("session_id", sessionId).eq("user_id", getUid());
+  if (error) { if (error.code === "23505") return false; throw error; }
   return true;
 }
-// Choose a nation for your seat. Picking a nation clears ready (force re-confirm).
 export async function chooseNation(sessionId: string, nation: string): Promise<void> {
-  const uid = getUid();
-  const { error } = await supabase
-    .from("session_players").update({ nation, ready: false })
-    .eq("session_id", sessionId).eq("user_id", uid);
+  const { error } = await supabase.from("session_players").update({ nation, ready: false })
+    .eq("session_id", sessionId).eq("user_id", getUid());
   if (error) throw error;
 }
-// Toggle your ready flag (only allowed once a nation is chosen — enforced in UI).
 export async function setReady(sessionId: string, ready: boolean): Promise<void> {
-  const uid = getUid();
-  const { error } = await supabase
-    .from("session_players").update({ ready })
-    .eq("session_id", sessionId).eq("user_id", uid);
-  if (error) throw error;
-}
-// Update your display name on an existing seat (after editing it in the lobby).
-export async function updateMyName(sessionId: string, name: string): Promise<void> {
-  setName(name);
-  const { error } = await supabase
-    .from("session_players").update({ display_name: name })
+  const { error } = await supabase.from("session_players").update({ ready })
     .eq("session_id", sessionId).eq("user_id", getUid());
   if (error) throw error;
 }
 
 /* ---------------- leave ---------------- */
-// Remove yourself; if you were host, hand off to the next human, else leave as-is.
 export async function leaveSession(sessionId: string): Promise<void> {
   const uid = getUid();
   const players = await fetchPlayers(sessionId);
@@ -196,62 +163,39 @@ export async function leaveSession(sessionId: string): Promise<void> {
   const session = await fetchSession(sessionId);
   if (session && session.host_id === uid) {
     const nextHuman = players.find((p) => p.user_id !== uid && !p.is_ai);
-    if (nextHuman) {
-      await supabase.from("sessions").update({ host_id: nextHuman.user_id }).eq("id", sessionId);
-    }
+    if (nextHuman) await supabase.from("sessions").update({ host_id: nextHuman.user_id }).eq("id", sessionId);
   }
 }
 
 /* ---------------- host: fill AI + start ---------------- */
-// A handful of sensible default nations for AI-filled seats (one per faction).
-const AI_NATIONS: Record<Seat, string> = {
-  player1: "germany", player2: "britain", player3: "france", player4: "russia",
-};
-// Fill every empty seat with a ready AI player, then flip the session to 'active'.
+const AI_NATIONS: Record<Seat, string> = { player1: "germany", player2: "britain", player3: "france", player4: "russia" };
 export async function startGame(sessionId: string): Promise<void> {
   const players = await fetchPlayers(sessionId);
   const taken = new Set(players.map((p) => p.seat));
   const aiRows = SEATS.filter((s) => !taken.has(s)).map((seat) => ({
-    session_id: sessionId,
-    user_id: `ai-${seat}`,                                 // text id, unique within session
-    seat,
-    nation: AI_NATIONS[seat],
-    display_name: `${SEAT_INFO[seat].name} (AI)`,
-    is_ai: true,
-    ready: true,
+    session_id: sessionId, user_id: `ai-${seat}`, seat, nation: AI_NATIONS[seat],
+    display_name: `${SEAT_INFO[seat].name} (AI)`, is_ai: true, ready: true,
   }));
   if (aiRows.length) {
     const { error } = await supabase.from("session_players").insert(aiRows);
-    if (error && error.code !== "23505") throw error;      // ignore if a seat filled meanwhile
+    if (error && error.code !== "23505") throw error;
   }
-  const { error: uErr } = await supabase
-    .from("sessions")
-    .update({ status: "active", last_turn_at: new Date().toISOString(), tick: 0 })
-    .eq("id", sessionId);
+  const { error: uErr } = await supabase.from("sessions")
+    .update({ status: "active", last_turn_at: new Date().toISOString(), tick: 0 }).eq("id", sessionId);
   if (uErr) throw uErr;
 }
 
-// All human players have chosen a nation and readied (AI seats are always ready).
 export function allReady(players: PlayerRow[]): boolean {
   if (players.length === 0) return false;
   return players.every((p) => p.is_ai || (p.ready && !!p.nation));
 }
 
 /* ---------------- realtime ---------------- */
-// Subscribe to a lobby: fires onPlayers on any seat change, onSession on session change.
 export function subscribeLobby(
-  sessionId: string,
-  onPlayers: () => void,
-  onSession: (s: SessionRow) => void
+  sessionId: string, onPlayers: () => void, onSession: (s: SessionRow) => void
 ): RealtimeChannel {
-  const channel = supabase
-    .channel(`lobby:${sessionId}`)
-    .on("postgres_changes",
-      { event: "*", schema: "public", table: "session_players", filter: `session_id=eq.${sessionId}` },
-      () => onPlayers())                                   // reload all 4 rows (cheap)
-    .on("postgres_changes",
-      { event: "UPDATE", schema: "public", table: "sessions", filter: `id=eq.${sessionId}` },
-      (payload) => onSession(payload.new as SessionRow))   // catch status → 'active'
+  return supabase.channel(`lobby:${sessionId}`)
+    .on("postgres_changes", { event: "*", schema: "public", table: "session_players", filter: `session_id=eq.${sessionId}` }, () => onPlayers())
+    .on("postgres_changes", { event: "UPDATE", schema: "public", table: "sessions", filter: `id=eq.${sessionId}` }, (p) => onSession(p.new as SessionRow))
     .subscribe();
-  return channel;
 }

@@ -13,6 +13,7 @@ import HomelandScreen from "@/components/HomelandScreen";
 import DoctrineScreen from "@/components/DoctrineScreen";
 import HeroesScreen from "@/components/HeroesScreen";
 import LobbyScreen from "@/components/LobbyScreen";
+import AuthScreen from "@/components/AuthScreen";
 import { useGame } from "@/lib/store";
 import { fmt } from "@/lib/catalog";
 import { initGlobalSfx, playMusic, stopMusic, type MusicName } from "@/lib/audio";
@@ -23,11 +24,11 @@ type Tab = "campaign" | "collection" | "battle";
 const SCREEN_MUSIC: Record<string, MusicName> = {
   menu: "menuMusic", settings: "menuMusic", nation: "nationMusic",
   hub: "hubMusic", trade: "hubMusic", game: "hubMusic", homeland: "hubMusic",
-  barracks: "barracksMusic", world: "worldMusic", lobby: "menuMusic",
+  barracks: "barracksMusic", world: "worldMusic", lobby: "menuMusic", auth: "menuMusic",
 };
 
 export default function Page() {
-  const [screen, setScreen] = useState<"menu" | "intro" | "nation" | "hub" | "barracks" | "trade" | "world" | "game" | "settings" | "homeland" | "doctrine" | "heroes" | "lobby">("menu");
+  const [screen, setScreen] = useState<"menu" | "intro" | "nation" | "hub" | "barracks" | "trade" | "world" | "game" | "settings" | "homeland" | "doctrine" | "heroes" | "lobby" | "auth">("menu");
   const [tab, setTab] = useState<Tab>("campaign");
   const game = useGame();
 
@@ -41,12 +42,17 @@ export default function Page() {
   const active = game.collection.filter((u) => u.troops > 0).length;
 
   if (screen === "menu") return (
-    <MainMenu hasSave={!!game.position} onContinue={() => setScreen(game.nation ? "hub" : "nation")} onNew={() => { game.reset(); setScreen("intro"); }} onMultiplayer={() => setScreen("lobby")} onSettings={() => setScreen("settings")} />
+    <MainMenu hasSave={!!game.position} onContinue={() => setScreen(game.nation ? "hub" : "nation")} onNew={() => { game.reset(); setScreen("intro"); }} onMultiplayer={() => setScreen("lobby")} onAccount={() => setScreen("auth")} onSettings={() => setScreen("settings")} />
+  );
+
+  if (screen === "auth") return (
+    <AuthScreen onBack={() => setScreen("menu")} onDone={() => setScreen("menu")} />
   );
 
   if (screen === "lobby") return (
     <LobbyScreen
       onBack={() => setScreen("menu")}
+      onAuth={() => setScreen("auth")}
       // Lobby slice hand-off: once the host starts, drop into the hub.
       // (Full multiplayer world sync wires in next.)
       onStart={() => setScreen("hub")}
