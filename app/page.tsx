@@ -62,7 +62,7 @@ export default function Page() {
   const totalTroops = game.collection.reduce((s, u) => s + u.troops, 0);  const active = game.collection.filter((u) => u.troops > 0).length;
 
   if (screen === "menu") return (
-    <MainMenu hasSave={!!game.position} onContinue={() => setScreen(game.nation ? "hub" : "nation")} onNew={() => { game.reset(); setScreen("intro"); }} onMultiplayer={() => { setLobbyResume(null); setScreen("lobby"); }} onAccount={() => setScreen("auth")} onProfile={() => setScreen("profile")} onSettings={() => setScreen("settings")} resume={resume} onResume={handleResume} />
+    <MainMenu hasSave={!!game.nation || !!game.position} onContinue={() => setScreen(game.nation ? "hub" : "nation")} onNew={() => { game.reset(); setScreen("intro"); }} onMultiplayer={() => { setLobbyResume(null); setScreen("lobby"); }} onAccount={() => setScreen("auth")} onProfile={() => setScreen("profile")} onSettings={() => setScreen("settings")} resume={resume} onResume={handleResume} />
   );
 
   if (screen === "auth") return (
