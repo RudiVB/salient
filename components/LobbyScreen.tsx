@@ -14,9 +14,9 @@ import { NATIONS } from "@/lib/nations";
 import { supabaseReady } from "@/lib/supabase";
 import { useAuth } from "@/lib/auth";
 import {
-  SEATS, SEAT_INFO, type Seat, type SessionRow, type PlayerRow, type PublicLobby, type Visibility,
+  SEATS, SEAT_INFO, type Seat, type SessionRow, type PlayerRow, type PublicLobby, type Visibility, type ResumeInfo,
   getUid, getName, setName,
-  createSession, joinSession, joinPublicLobby, listPublicLobbies, fetchPlayers,
+  createSession, joinSession, joinPublicLobby, listPublicLobbies, fetchPlayers, fetchSession, findMyActiveSession,
   switchSeat, chooseNation, setReady, leaveSession, startGame, allReady, subscribeLobby,
 } from "@/lib/lobby";
 import type { RealtimeChannel } from "@supabase/supabase-js";
@@ -24,11 +24,12 @@ import type { RealtimeChannel } from "@supabase/supabase-js";
 type Phase = "menu" | "browse" | "connecting" | "lobby";
 
 export default function LobbyScreen({
-  onBack, onStart, onAuth,
+  onBack, onStart, onAuth, resume,
 }: {
   onBack: () => void;
   onStart: (info: { sessionId: string; seat: Seat; code: string }) => void;
   onAuth?: () => void;
+  resume?: { sessionId: string; seat: Seat; code: string } | null;   // rejoin straight into this lobby
 }) {
   const { loggedIn, username } = useAuth();
   const [phase, setPhase] = useState<Phase>("menu");
@@ -47,12 +48,48 @@ export default function LobbyScreen({
 
   const [lobbies, setLobbies] = useState<PublicLobby[]>([]);
   const [lobbiesLoading, setLobbiesLoading] = useState(false);
+  const [resumeHint, setResumeHint] = useState<ResumeInfo | null>(null);   // detected active game
 
   const channelRef = useRef<RealtimeChannel | null>(null);
   const startedRef = useRef(false);
   const uid = typeof window !== "undefined" ? getUid() : "ssr";
 
   useEffect(() => { setNameState(getName()); }, [loggedIn, username]);
+
+  /* ---------------- rejoin straight into a resumed lobby ---------------- */
+  useEffect(() => {
+    if (!resume) return;
+    setPhase("connecting");
+    (async () => {
+      try {
+        const s = await fetchSession(resume.sessionId);
+        if (s && s.status === "lobby") { setSession(s); setMySeat(resume.seat); setPhase("lobby"); }
+        else if (s && s.status === "active") { onStart({ sessionId: s.id, seat: resume.seat, code: s.code }); }
+        else { setPhase("menu"); }                       // ended or gone
+      } catch (e) { setError(msg(e)); setPhase("menu"); }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resume?.sessionId]);
+
+  /* ---------------- detect an existing game to rejoin (menu only) ---------------- */
+  useEffect(() => {
+    if (phase !== "menu" || !supabaseReady) { setResumeHint(null); return; }
+    let alive = true;
+    findMyActiveSession().then((r) => { if (alive) setResumeHint(r); }).catch(() => {});
+    return () => { alive = false; };
+  }, [phase]);
+
+  async function doRejoin(r: ResumeInfo) {
+    setError(null); setPending(true); setPhase("connecting");
+    try {
+      if (r.status === "active") { onStart({ sessionId: r.sessionId, seat: r.seat, code: r.code }); return; }
+      const s = await fetchSession(r.sessionId);
+      if (s && s.status === "lobby") { setSession(s); setMySeat(r.seat); setPhase("lobby"); }
+      else if (s && s.status === "active") { onStart({ sessionId: s.id, seat: r.seat, code: s.code }); }
+      else { setPhase("menu"); }
+    } catch (e) { setError(msg(e)); setPhase("menu"); }
+    finally { setPending(false); }
+  }
 
   /* ---------------- realtime + initial load in a lobby ---------------- */
   const reloadPlayers = useCallback(async (sessionId: string) => {
@@ -230,6 +267,17 @@ export default function LobbyScreen({
     return (
       <Shell onBack={onBack} title="MULTIPLAYER">
         <AccountLine />
+        {resumeHint && (
+          <div className="lb-resume">
+            <div>
+              <div className="lb-muted" style={{ fontSize: 11, letterSpacing: 2 }}>{resumeHint.status === "active" ? "LIVE MATCH" : "OPEN LOBBY"}</div>
+              <div className="lb-rname">{resumeHint.name || "Your War"} · <span style={{ color: "#f0c860" }}>{resumeHint.code}</span></div>
+            </div>
+            <button className="lb-btn lb-primary" style={{ marginTop: 0 }} disabled={pending} onClick={() => doRejoin(resumeHint)}>
+              ▸ {resumeHint.status === "active" ? "Rejoin Match" : "Rejoin Lobby"}
+            </button>
+          </div>
+        )}
         <div className="lb-grid2">
           <div className="lb-card">
             <div className="lb-h">Your name</div>
@@ -367,6 +415,9 @@ const CSS = `
 .lb-content { max-width: 900px; margin: 0 auto; padding: 22px 18px; }
 .lb-acct { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
   margin-bottom: 16px; padding: 10px 14px; background: rgba(8,14,24,.4); border: 1px solid rgba(120,150,190,.14); clip-path: var(--cham); }
+.lb-resume { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  margin-bottom: 16px; padding: 12px 16px; background: rgba(86,185,207,.10); border: 1px solid rgba(86,185,207,.4); clip-path: var(--cham); }
+.lb-rname { font-size: 16px; font-weight: 600; }
 
 .lb-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 @media (max-width: 680px) { .lb-grid2 { grid-template-columns: 1fr; } }

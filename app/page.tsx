@@ -17,6 +17,7 @@ import AuthScreen from "@/components/AuthScreen";
 import MatchScreen from "@/components/MatchScreen";
 import ProfileScreen from "@/components/ProfileScreen";
 import type { Seat } from "@/lib/lobby";
+import { findMyActiveSession, type ResumeInfo } from "@/lib/lobby";
 import { useGame } from "@/lib/store";
 import { fmt } from "@/lib/catalog";
 import { initGlobalSfx, playMusic, stopMusic, type MusicName } from "@/lib/audio";
@@ -33,6 +34,8 @@ const SCREEN_MUSIC: Record<string, MusicName> = {
 export default function Page() {
   const [screen, setScreen] = useState<"menu" | "intro" | "nation" | "hub" | "barracks" | "trade" | "world" | "game" | "settings" | "homeland" | "doctrine" | "heroes" | "lobby" | "auth" | "match" | "profile">("menu");
   const [match, setMatch] = useState<{ sessionId: string; seat: Seat; code: string } | null>(null);
+  const [resume, setResume] = useState<ResumeInfo | null>(null);                    // detected rejoinable game
+  const [lobbyResume, setLobbyResume] = useState<{ sessionId: string; seat: Seat; code: string } | null>(null);
   const [tab, setTab] = useState<Tab>("campaign");
   const game = useGame();
 
@@ -42,11 +45,24 @@ export default function Page() {
     playMusic(SCREEN_MUSIC[screen] || "menuMusic");
   }, [screen]);
 
-  const totalTroops = game.collection.reduce((s, u) => s + u.troops, 0);
-  const active = game.collection.filter((u) => u.troops > 0).length;
+  // detect a rejoinable lobby/match whenever we're on the title screen
+  useEffect(() => {
+    if (screen !== "menu") return;
+    let alive = true;
+    findMyActiveSession().then((r) => { if (alive) setResume(r); }).catch(() => {});
+    return () => { alive = false; };
+  }, [screen]);
+
+  // route a Continue/Rejoin: live match → straight in; open lobby → into the lobby
+  const handleResume = (r: ResumeInfo) => {
+    if (r.status === "active") { setMatch({ sessionId: r.sessionId, seat: r.seat, code: r.code }); setScreen("match"); }
+    else { setLobbyResume({ sessionId: r.sessionId, seat: r.seat, code: r.code }); setScreen("lobby"); }
+  };
+
+  const totalTroops = game.collection.reduce((s, u) => s + u.troops, 0);  const active = game.collection.filter((u) => u.troops > 0).length;
 
   if (screen === "menu") return (
-    <MainMenu hasSave={!!game.position} onContinue={() => setScreen(game.nation ? "hub" : "nation")} onNew={() => { game.reset(); setScreen("intro"); }} onMultiplayer={() => setScreen("lobby")} onAccount={() => setScreen("auth")} onProfile={() => setScreen("profile")} onSettings={() => setScreen("settings")} />
+    <MainMenu hasSave={!!game.position} onContinue={() => setScreen(game.nation ? "hub" : "nation")} onNew={() => { game.reset(); setScreen("intro"); }} onMultiplayer={() => { setLobbyResume(null); setScreen("lobby"); }} onAccount={() => setScreen("auth")} onProfile={() => setScreen("profile")} onSettings={() => setScreen("settings")} resume={resume} onResume={handleResume} />
   );
 
   if (screen === "auth") return (
@@ -59,10 +75,11 @@ export default function Page() {
 
   if (screen === "lobby") return (
     <LobbyScreen
-      onBack={() => setScreen("menu")}
+      onBack={() => { setLobbyResume(null); setScreen("menu"); }}
       onAuth={() => setScreen("auth")}
+      resume={lobbyResume}
       // Host start hands every client the live match.
-      onStart={(info) => { setMatch(info); setScreen("match"); }}
+      onStart={(info) => { setLobbyResume(null); setMatch(info); setScreen("match"); }}
     />
   );
 

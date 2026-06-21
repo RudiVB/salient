@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import PolyScene from "@/components/PolyScene";
 import { toggleMute, isMuted } from "@/lib/audio";
+import type { ResumeInfo } from "@/lib/lobby";
 
 /**
  * MainMenu — the title screen. components/MainMenu.tsx
@@ -16,8 +17,8 @@ import { toggleMute, isMuted } from "@/lib/audio";
  *   );
  */
 export default function MainMenu({
-  onContinue, onNew, onSettings, onMultiplayer, onAccount, onProfile, hasSave = true,
-}: { onContinue?: () => void; onNew?: () => void; onSettings?: () => void; onMultiplayer?: () => void; onAccount?: () => void; onProfile?: () => void; hasSave?: boolean }) {
+  onContinue, onNew, onSettings, onMultiplayer, onAccount, onProfile, resume, onResume, hasSave = true,
+}: { onContinue?: () => void; onNew?: () => void; onSettings?: () => void; onMultiplayer?: () => void; onAccount?: () => void; onProfile?: () => void; resume?: ResumeInfo | null; onResume?: (r: ResumeInfo) => void; hasSave?: boolean }) {
   const sceneRef = useRef<HTMLDivElement>(null);
   const [howto, setHowto] = useState(false);
   const [muted, setMuted] = useState(false);
@@ -59,6 +60,11 @@ export default function MainMenu({
         <div className="mm-year">· 1916 ·</div>
         <div className="mm-tag">Raise regiments. Hold your fronts. Conquer the world.</div>
         <div className="mm-menu">
+          {resume && onResume && (
+            <button className="mm-btn mm-primary" onClick={() => onResume(resume)}>
+              ▸ Rejoin {resume.status === "active" ? "Match" : "Lobby"} · {resume.code}
+            </button>
+          )}
           {hasSave && <button className="mm-btn mm-primary" onClick={onContinue}>▸ Continue Campaign</button>}
           <button className="mm-btn" onClick={onNew}>New Campaign</button>
           <button className="mm-btn" onClick={onMultiplayer}>⚔ Multiplayer</button>

@@ -73,6 +73,34 @@ export async function listPublicLobbies(): Promise<PublicLobby[]> {
   return (data || []) as PublicLobby[];
 }
 
+// A lobby/match the current user already holds a seat in — for "Continue / Rejoin".
+export interface ResumeInfo { sessionId: string; seat: Seat; code: string; status: string; name: string | null; }
+export async function findMyActiveSession(): Promise<ResumeInfo | null> {
+  const uid = getUid();
+  // my non-AI seats, most-recently joined first
+  const { data: seats, error: e1 } = await supabase
+    .from("session_players").select("session_id, seat, joined_at")
+    .eq("user_id", uid).eq("is_ai", false)
+    .order("joined_at", { ascending: false });
+  if (e1) throw e1;
+  if (!seats || seats.length === 0) return null;
+
+  // of those, the ones still in a lobby or live match
+  const ids = seats.map((s) => s.session_id);
+  const { data: sess, error: e2 } = await supabase
+    .from("sessions").select("id, code, status, name")
+    .in("id", ids).in("status", ["lobby", "active"]);
+  if (e2) throw e2;
+  if (!sess || sess.length === 0) return null;
+
+  const live = new Map(sess.map((s) => [s.id, s]));
+  for (const row of seats) {                       // return the most recently joined live one
+    const s = live.get(row.session_id);
+    if (s) return { sessionId: s.id, seat: row.seat as Seat, code: s.code, status: s.status, name: s.name };
+  }
+  return null;
+}
+
 /* ---------------- seat claim helper ---------------- */
 // Claim the first free seat in a session for the current user. Race-safe via the
 // UNIQUE(session_id, seat) constraint (retries the next seat on 23505).
