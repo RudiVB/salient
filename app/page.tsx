@@ -14,6 +14,8 @@ import DoctrineScreen from "@/components/DoctrineScreen";
 import HeroesScreen from "@/components/HeroesScreen";
 import LobbyScreen from "@/components/LobbyScreen";
 import AuthScreen from "@/components/AuthScreen";
+import MatchScreen from "@/components/MatchScreen";
+import type { Seat } from "@/lib/lobby";
 import { useGame } from "@/lib/store";
 import { fmt } from "@/lib/catalog";
 import { initGlobalSfx, playMusic, stopMusic, type MusicName } from "@/lib/audio";
@@ -24,11 +26,12 @@ type Tab = "campaign" | "collection" | "battle";
 const SCREEN_MUSIC: Record<string, MusicName> = {
   menu: "menuMusic", settings: "menuMusic", nation: "nationMusic",
   hub: "hubMusic", trade: "hubMusic", game: "hubMusic", homeland: "hubMusic",
-  barracks: "barracksMusic", world: "worldMusic", lobby: "menuMusic", auth: "menuMusic",
+  barracks: "barracksMusic", world: "worldMusic", lobby: "menuMusic", auth: "menuMusic", match: "worldMusic",
 };
 
 export default function Page() {
-  const [screen, setScreen] = useState<"menu" | "intro" | "nation" | "hub" | "barracks" | "trade" | "world" | "game" | "settings" | "homeland" | "doctrine" | "heroes" | "lobby" | "auth">("menu");
+  const [screen, setScreen] = useState<"menu" | "intro" | "nation" | "hub" | "barracks" | "trade" | "world" | "game" | "settings" | "homeland" | "doctrine" | "heroes" | "lobby" | "auth" | "match">("menu");
+  const [match, setMatch] = useState<{ sessionId: string; seat: Seat; code: string } | null>(null);
   const [tab, setTab] = useState<Tab>("campaign");
   const game = useGame();
 
@@ -53,10 +56,14 @@ export default function Page() {
     <LobbyScreen
       onBack={() => setScreen("menu")}
       onAuth={() => setScreen("auth")}
-      // Lobby slice hand-off: once the host starts, drop into the hub.
-      // (Full multiplayer world sync wires in next.)
-      onStart={() => setScreen("hub")}
+      // Host start hands every client the live match.
+      onStart={(info) => { setMatch(info); setScreen("match"); }}
     />
+  );
+
+  if (screen === "match" && match) return (
+    <MatchScreen sessionId={match.sessionId} seat={match.seat} code={match.code}
+      onExit={() => { setMatch(null); setScreen("menu"); }} />
   );
 
   if (screen === "settings") return <SettingsScreen onBack={() => setScreen("menu")} />;

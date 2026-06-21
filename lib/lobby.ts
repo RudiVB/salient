@@ -5,6 +5,7 @@
 "use client";
 import { supabase } from "@/lib/supabase";
 import { currentUid, displayName, setLocalName, upsertProfile, authUserId } from "@/lib/auth";
+import { SEAT_FACTION, seedMPWorld, type MPPlayerMeta, type Stance } from "@/lib/mpworld";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 
 /* ---------------- identity (delegated to auth) ---------------- */
@@ -36,7 +37,8 @@ export interface SessionRow {
 }
 export interface PlayerRow {
   id: string; session_id: string; user_id: string; seat: Seat;
-  nation: string | null; display_name: string | null; is_ai: boolean; ready: boolean; joined_at: string;
+  nation: string | null; display_name: string | null; is_ai: boolean; ready: boolean;
+  stance: string; joined_at: string;
 }
 export interface PublicLobby {
   id: string; code: string; name: string | null; host_id: string;
@@ -170,8 +172,8 @@ export async function leaveSession(sessionId: string): Promise<void> {
 /* ---------------- host: fill AI + start ---------------- */
 const AI_NATIONS: Record<Seat, string> = { player1: "germany", player2: "britain", player3: "france", player4: "russia" };
 export async function startGame(sessionId: string): Promise<void> {
-  const players = await fetchPlayers(sessionId);
-  const taken = new Set(players.map((p) => p.seat));
+  const roster = await fetchPlayers(sessionId);
+  const taken = new Set(roster.map((p) => p.seat));
   const aiRows = SEATS.filter((s) => !taken.has(s)).map((seat) => ({
     session_id: sessionId, user_id: `ai-${seat}`, seat, nation: AI_NATIONS[seat],
     display_name: `${SEAT_INFO[seat].name} (AI)`, is_ai: true, ready: true,
@@ -180,8 +182,25 @@ export async function startGame(sessionId: string): Promise<void> {
     const { error } = await supabase.from("session_players").insert(aiRows);
     if (error && error.code !== "23505") throw error;
   }
+
+  // Re-read the full roster (humans + freshly inserted AI) and seed the shared world.
+  const full = await fetchPlayers(sessionId);
+  const factionMeta: Record<string, MPPlayerMeta> = {};
+  const stance: Record<string, Stance> = {};
+  for (const p of full) {
+    const faction = SEAT_FACTION[p.seat]; if (!faction) continue;
+    factionMeta[faction] = {
+      name: p.display_name || SEAT_INFO[p.seat].name,
+      isAi: p.is_ai,
+      nation: p.nation,
+    };
+    stance[faction] = (p.stance as Stance) || "balanced";
+  }
+  const world = seedMPWorld(factionMeta, stance);   // host is the world authority from here
+
   const { error: uErr } = await supabase.from("sessions")
-    .update({ status: "active", last_turn_at: new Date().toISOString(), tick: 0 }).eq("id", sessionId);
+    .update({ status: "active", world, last_turn_at: new Date().toISOString(), tick: 0 })
+    .eq("id", sessionId);
   if (uErr) throw uErr;
 }
 
